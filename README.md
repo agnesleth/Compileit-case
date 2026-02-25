@@ -20,6 +20,20 @@ You can start editing the page by modifying `app/page.tsx`. The page auto-update
 
 This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
 
+## Backend Chat Proxy
+
+The frontend sends chat requests to `POST /api/chat`, which proxies to your backend endpoint.
+
+Set one of these in `.env.local`:
+
+```bash
+# Preferred: full backend endpoint
+BACKEND_CHAT_URL=http://localhost:8000/api/chat
+
+# Alternative: base URL (route proxy appends /api/chat)
+# BACKEND_BASE_URL=http://localhost:8000
+```
+
 ## Learn More
 
 To learn more about Next.js, take a look at the following resources:
