@@ -9,7 +9,9 @@ This module contains:
 
 from __future__ import annotations
 
+import logging
 import os
+import re
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
@@ -17,6 +19,7 @@ from typing import Any, Iterator, Sequence, TypedDict
 
 from dotenv import load_dotenv
 from langchain_chroma import Chroma
+from langchain_core.documents import Document
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
 from langchain_core.tools import tool
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
@@ -26,6 +29,9 @@ from langgraph.graph import END, START, StateGraph
 BASE_DIR = Path(__file__).resolve().parent
 load_dotenv(BASE_DIR / ".env")
 
+logger = logging.getLogger(__name__)
+if not logger.handlers:
+    logging.basicConfig(level=logging.INFO, format="[%(levelname)s] %(message)s")
 
 SYSTEM_PROMPT = """Du är Compileits AI-assistent.
 
@@ -37,26 +43,122 @@ Regler du ALLTID ska följa:
 """
 
 FALLBACK_NO_CONTEXT_RESPONSE = (
-    "Jag vet tyvärr inte svaret baserat på informationen jag har hämtat från compileit.com."
+    "Jag vet inte säkert baserat på informationen jag har hittat om Compileit.\n"
+    "Menar du branscher hos kunderna, eller vilka typer av uppdrag och tjänster vi jobbar med?"
+)
+LOW_CONFIDENCE_RESPONSE_TEMPLATE = (
+    "Jag vet inte säkert utifrån tillgänglig information för frågan: \"{query}\".\n"
+    "Kan du förtydliga vad du menar?\n"
+    "Exempel: branscher hos kunder, typer av uppdrag eller vilka tjänster Compileit erbjuder."
 )
 
 DEFAULT_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 DEFAULT_COLLECTION = os.getenv("CHROMA_COLLECTION_NAME", "compileit_docs")
-DEFAULT_K = 4
+DEFAULT_CANDIDATE_K = int(os.getenv("RETRIEVAL_CANDIDATE_K", "24"))
+DEFAULT_FINAL_K = int(os.getenv("RETRIEVAL_FINAL_K", "6"))
+DEBUG_RETRIEVAL = os.getenv("DEBUG_RETRIEVAL", "0").lower() in ("1", "true", "yes")
+
+SECTION_BOOSTS: dict[str, float] = {
+    "services": 0.20,
+    "cases": 0.18,
+    "about": 0.08,
+    "news": 0.03,
+    "general": 0.0,
+}
+SWEDISH_STOPWORDS = {
+    "och",
+    "att",
+    "det",
+    "som",
+    "en",
+    "ett",
+    "den",
+    "de",
+    "i",
+    "på",
+    "av",
+    "till",
+    "för",
+    "med",
+    "om",
+    "hur",
+    "vad",
+    "vilka",
+    "vilken",
+    "är",
+    "har",
+    "ni",
+    "er",
+    "vi",
+    "man",
+    "från",
+}
+GENERIC_TEXT_PATTERNS = (
+    "webbplatsen använder cookies",
+    "välj vilka cookies du vill godkänna",
+    "integritetspolicy",
+    "cookie policy",
+    "jobbar du redan på compileit",
+)
+BUSINESS_INTENT_BRANSCH_PATTERNS = (r"\bbransch\w*", r"\bindustri\w*")
+BRANSCH_EXPANSION_TERMS = ("kunder", "uppdrag", "case", "verksamhet")
+OUT_OF_SCOPE_STEMS = (
+    "väd",
+    "temperat",
+    "prognos",
+    "match",
+    "sport",
+    "aktie",
+    "bitcoin",
+    "krypto",
+)
+COMPILEIT_RELEVANCE_STEMS = (
+    "compileit",
+    "tjänst",
+    "uppdrag",
+    "case",
+    "kund",
+    "bransch",
+    "ai",
+    "apputveck",
+    "webbutveck",
+    "kontakt",
+    "säker",
+    "sekret",
+    "karri",
+    "nyhet",
+)
 
 
 @dataclass
-class SourceItem:
+class RetrievedCandidate:
     title: str
     url: str
+    section: str
     snippet: str
+    vector_score: float
+    lexical_score: float
+    section_boost: float
+    final_score: float
+
+
+class SourceItem(TypedDict):
+    title: str
+    url: str
 
 
 class AgentState(TypedDict, total=False):
     messages: list[BaseMessage]
     search_query: str
+    expanded_query: str
     context: str
-    sources: list[dict[str, str]]
+    sources: list[SourceItem]
+    low_confidence: bool
+
+
+def debug_log(message: str, *args: object) -> None:
+    if DEBUG_RETRIEVAL:
+        logger.info(message, *args)
 
 
 def _get_chroma_persist_dir() -> str:
@@ -163,33 +265,218 @@ def _sanitize_title(title: str, url: str) -> str:
     return url.replace("https://", "").replace("http://", "").rstrip("/")
 
 
+def _tokenize(text: str) -> list[str]:
+    tokens = re.findall(r"[a-z0-9åäö]+", text.lower())
+    return [token for token in tokens if token not in SWEDISH_STOPWORDS and len(token) > 2]
+
+
+def _clamp_score(score: float) -> float:
+    if score < 0:
+        return 0.0
+    if score > 1:
+        return 1.0
+    return score
+
+
+def _lexical_overlap_score(query: str, text: str) -> float:
+    query_tokens = set(_tokenize(query))
+    if not query_tokens:
+        return 0.0
+
+    text_tokens = set(_tokenize(text))
+    overlap = query_tokens.intersection(text_tokens)
+    return len(overlap) / len(query_tokens)
+
+
+def _is_generic_chunk(text: str) -> bool:
+    lowered = text.lower()
+    return any(pattern in lowered for pattern in GENERIC_TEXT_PATTERNS)
+
+
+def _tokens_match_stems(tokens: set[str], stems: Sequence[str]) -> bool:
+    for token in tokens:
+        for stem in stems:
+            if token.startswith(stem):
+                return True
+    return False
+
+
+def _expand_search_query(query: str) -> str:
+    expanded_terms: list[str] = []
+    for pattern in BUSINESS_INTENT_BRANSCH_PATTERNS:
+        if re.search(pattern, query.lower()):
+            expanded_terms.extend(BRANSCH_EXPANSION_TERMS)
+            break
+
+    if not expanded_terms:
+        return query
+
+    expansion = " ".join(expanded_terms)
+    return f"{query} {expansion}".strip()
+
+
+def _build_candidate(
+    doc: Document,
+    vector_score: float,
+    query_for_lexical: str,
+) -> RetrievedCandidate | None:
+    metadata = doc.metadata or {}
+    url = str(metadata.get("source", "")).strip()
+    if not url:
+        return None
+
+    domain = str(metadata.get("domain", "")).strip().lower()
+    if domain and domain != "compileit.com":
+        return None
+
+    section = str(metadata.get("section", "general")).strip().lower() or "general"
+    section_boost = SECTION_BOOSTS.get(section, 0.0)
+
+    snippet = " ".join(str(doc.page_content).split())
+    snippet = snippet[:700].strip()
+    lexical_score = _lexical_overlap_score(query_for_lexical, snippet)
+    final_score = (0.75 * vector_score) + (0.25 * lexical_score) + section_boost
+
+    return RetrievedCandidate(
+        title=_sanitize_title(str(metadata.get("title", "")), url),
+        url=url,
+        section=section,
+        snippet=snippet,
+        vector_score=vector_score,
+        lexical_score=lexical_score,
+        section_boost=section_boost,
+        final_score=final_score,
+    )
+
+
+def _retrieve_ranked_candidates(question: str) -> tuple[str, list[RetrievedCandidate]]:
+    expanded_query = _expand_search_query(question)
+    vector_store = get_vector_store()
+
+    try:
+        doc_score_pairs = vector_store.similarity_search_with_relevance_scores(
+            expanded_query,
+            k=DEFAULT_CANDIDATE_K,
+            filter={"domain": "compileit.com"},
+        )
+    except TypeError:
+        doc_score_pairs = vector_store.similarity_search_with_relevance_scores(
+            expanded_query,
+            k=DEFAULT_CANDIDATE_K,
+        )
+    candidates: list[RetrievedCandidate] = []
+    for doc, raw_score in doc_score_pairs:
+        vector_score = _clamp_score(float(raw_score))
+        candidate = _build_candidate(doc=doc, vector_score=vector_score, query_for_lexical=expanded_query)
+        if candidate is not None:
+            candidates.append(candidate)
+
+    candidates.sort(key=lambda item: item.final_score, reverse=True)
+    return expanded_query, candidates
+
+
+def _is_low_confidence(
+    question: str,
+    selected_candidates: Sequence[RetrievedCandidate],
+) -> bool:
+    if not selected_candidates:
+        return True
+
+    top = selected_candidates[0]
+    max_lexical = max(item.lexical_score for item in selected_candidates)
+    sections = {item.section for item in selected_candidates}
+    generic_count = sum(1 for item in selected_candidates if _is_generic_chunk(item.snippet))
+    query_tokens = set(_tokenize(question))
+
+    if top.final_score < 0.42:
+        return True
+    if max_lexical < 0.08:
+        return True
+    if generic_count >= max(2, len(selected_candidates) - 1):
+        return True
+    if sections == {"general"} and top.final_score < 0.55:
+        return True
+    if re.search(r"\bbransch\w*", question.lower()):
+        if not any(item.section in {"services", "cases", "about"} for item in selected_candidates):
+            return True
+    if _tokens_match_stems(query_tokens, OUT_OF_SCOPE_STEMS):
+        return True
+    if not _tokens_match_stems(query_tokens, COMPILEIT_RELEVANCE_STEMS) and top.final_score < 0.70:
+        return True
+
+    return False
+
+
+def _build_context_and_sources(
+    candidates: Sequence[RetrievedCandidate],
+) -> tuple[str, list[SourceItem], list[dict[str, float | str]]]:
+    context_chunks: list[str] = []
+    sources: list[SourceItem] = []
+    retrieval_rows: list[dict[str, float | str]] = []
+
+    for index, candidate in enumerate(candidates, start=1):
+        context_chunks.append(
+            f"[Källa {index}] {candidate.title}\n"
+            f"URL: {candidate.url}\n"
+            f"Innehåll: {candidate.snippet}"
+        )
+        sources.append({"title": candidate.title, "url": candidate.url})
+        retrieval_rows.append(
+            {
+                "title": candidate.title,
+                "url": candidate.url,
+                "section": candidate.section,
+                "vector_score": candidate.vector_score,
+                "lexical_score": candidate.lexical_score,
+                "section_boost": candidate.section_boost,
+                "final_score": candidate.final_score,
+            }
+        )
+
+    return "\n\n".join(context_chunks).strip(), sources, retrieval_rows
+
+
 @tool
 def search_compileit_knowledge(question: str) -> dict[str, Any]:
     """
-    Search Compileit's indexed website content via Chroma similarity search.
+    Search Compileit's indexed website content via ranked vector retrieval.
     """
-    vector_store = get_vector_store()
-    docs = vector_store.similarity_search(question, k=DEFAULT_K)
-
-    sources: list[SourceItem] = []
-    context_chunks: list[str] = []
-
-    for index, doc in enumerate(docs, start=1):
-        metadata = doc.metadata or {}
-        url = str(metadata.get("source", "")).strip()
-        if not url:
+    expanded_query, ranked_candidates = _retrieve_ranked_candidates(question)
+    selected: list[RetrievedCandidate] = []
+    seen_urls: set[str] = set()
+    for candidate in ranked_candidates:
+        if candidate.url in seen_urls:
             continue
+        seen_urls.add(candidate.url)
+        selected.append(candidate)
+        if len(selected) >= DEFAULT_FINAL_K:
+            break
 
-        title = _sanitize_title(str(metadata.get("title", "")), url)
-        snippet = " ".join(str(doc.page_content).split())
-        snippet = snippet[:700].strip()
+    if not selected:
+        selected = ranked_candidates[:DEFAULT_FINAL_K]
+    context, sources, retrieval_rows = _build_context_and_sources(selected)
+    low_confidence = _is_low_confidence(question=question, selected_candidates=selected)
 
-        sources.append(SourceItem(title=title, url=url, snippet=snippet))
-        context_chunks.append(f"[Källa {index}] {title}\nURL: {url}\nInnehåll: {snippet}")
+    debug_log("retrieval.query original=%s", question)
+    debug_log("retrieval.query expanded=%s", expanded_query)
+    debug_log("retrieval.count selected=%s total=%s", len(selected), len(ranked_candidates))
+    for row in retrieval_rows[:6]:
+        debug_log(
+            "retrieval.hit section=%s final=%.3f vec=%.3f lex=%.3f url=%s",
+            row["section"],
+            float(row["final_score"]),
+            float(row["vector_score"]),
+            float(row["lexical_score"]),
+            row["url"],
+        )
+    debug_log("retrieval.low_confidence=%s", low_confidence)
 
     return {
-        "context": "\n\n".join(context_chunks).strip(),
-        "sources": [{"title": source.title, "url": source.url} for source in sources],
+        "context": context,
+        "sources": sources,
+        "retrieval": retrieval_rows,
+        "expanded_query": expanded_query,
+        "low_confidence": low_confidence,
     }
 
 
@@ -228,13 +515,15 @@ def _build_context_graph():
             state.get("messages", [])
         )
         if not search_query:
-            return {"context": "", "sources": []}
+            return {"context": "", "sources": [], "low_confidence": True}
 
         tool_result = search_compileit_knowledge.invoke({"question": search_query})
         context = str(tool_result.get("context", "")).strip()
+        expanded_query = str(tool_result.get("expanded_query", search_query)).strip() or search_query
         raw_sources = tool_result.get("sources", [])
+        low_confidence = bool(tool_result.get("low_confidence", False))
 
-        sources: list[dict[str, str]] = []
+        sources: list[SourceItem] = []
         if isinstance(raw_sources, list):
             for source in raw_sources:
                 if not isinstance(source, dict):
@@ -244,7 +533,12 @@ def _build_context_graph():
                 if url:
                     sources.append({"title": title or url, "url": url})
 
-        return {"context": context, "sources": sources}
+        return {
+            "context": context,
+            "sources": sources,
+            "expanded_query": expanded_query,
+            "low_confidence": low_confidence,
+        }
 
     graph.add_node("rewrite", rewrite_node)
     graph.add_node("retrieve", retrieve_node)
@@ -278,19 +572,24 @@ def _chunk_to_text(chunk: Any) -> str:
     return ""
 
 
-def _format_sources_block(sources: Sequence[dict[str, str]]) -> str:
+def _format_sources_block(sources: Sequence[SourceItem]) -> str:
     lines: list[str] = []
     for idx, source in enumerate(sources, start=1):
-        title = source.get("title", "").strip() or source.get("url", "").strip()
-        url = source.get("url", "").strip()
+        title = source["title"].strip() or source["url"].strip()
+        url = source["url"].strip()
         if url:
             lines.append(f"{idx}. {title} ({url})")
     return "\n".join(lines).strip()
 
 
+def _build_low_confidence_response(query: str) -> str:
+    cleaned_query = query.strip() or "din fråga"
+    return LOW_CONFIDENCE_RESPONSE_TEMPLATE.format(query=cleaned_query)
+
+
 def prepare_context(
     ui_messages: Sequence[dict[str, Any]], session_id: str
-) -> tuple[list[BaseMessage], str, list[dict[str, str]], str]:
+) -> tuple[list[BaseMessage], str, list[SourceItem], str, bool]:
     lc_messages = ui_messages_to_langchain_messages(ui_messages)
     if not lc_messages:
         raise ValueError("Inga giltiga meddelanden skickades till agenten.")
@@ -302,36 +601,46 @@ def prepare_context(
     )
 
     search_query = str(result.get("search_query", "")).strip()
+    expanded_query = str(result.get("expanded_query", search_query)).strip() or search_query
     context = str(result.get("context", "")).strip()
-    sources = result.get("sources", [])
-    if not isinstance(sources, list):
-        sources = []
+    low_confidence = bool(result.get("low_confidence", False))
+    sources_raw = result.get("sources", [])
 
-    parsed_sources: list[dict[str, str]] = []
-    for source in sources:
-        if not isinstance(source, dict):
-            continue
-        title = str(source.get("title", "")).strip()
-        url = str(source.get("url", "")).strip()
-        if url:
-            parsed_sources.append({"title": title or url, "url": url})
+    sources: list[SourceItem] = []
+    if isinstance(sources_raw, list):
+        for source in sources_raw:
+            if not isinstance(source, dict):
+                continue
+            title = str(source.get("title", "")).strip()
+            url = str(source.get("url", "")).strip()
+            if url:
+                sources.append({"title": title or url, "url": url})
 
-    return lc_messages, context, parsed_sources, search_query
+    debug_log("prepare_context.search_query=%s", search_query)
+    debug_log("prepare_context.expanded_query=%s", expanded_query)
+    debug_log("prepare_context.low_confidence=%s", low_confidence)
+
+    return lc_messages, context, sources, expanded_query, low_confidence
 
 
 def stream_answer_tokens(
     ui_messages: Sequence[dict[str, Any]],
     session_id: str,
-) -> tuple[list[dict[str, str]], Iterator[str]]:
-    lc_messages, context, sources, search_query = prepare_context(ui_messages, session_id)
+) -> tuple[list[SourceItem], Iterator[str]]:
+    lc_messages, context, sources, expanded_query, low_confidence = prepare_context(
+        ui_messages, session_id
+    )
 
     if not context:
         return sources, iter([FALLBACK_NO_CONTEXT_RESPONSE])
 
+    if low_confidence:
+        return sources, iter([_build_low_confidence_response(expanded_query)])
+
     sources_block = _format_sources_block(sources)
     system_prompt = (
         f"{SYSTEM_PROMPT}\n\n"
-        f"Sökfråga: {search_query or _last_user_message(lc_messages)}\n\n"
+        f"Sökfråga: {expanded_query or _last_user_message(lc_messages)}\n\n"
         f"Tillgänglig kontext från compileit.com:\n{context}\n\n"
         f"Källor:\n{sources_block if sources_block else 'Inga explicita källor.'}"
     )
