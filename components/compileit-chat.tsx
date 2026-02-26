@@ -2,12 +2,14 @@
 
 import { useChat } from "@ai-sdk/react"
 import { DefaultChatTransport } from "ai"
+import { RotateCcw } from "lucide-react"
 import type { FormEvent } from "react"
 import { useMemo, useState } from "react"
 
 import { ChatComposer } from "@/components/chat-composer"
 import { ChatMessageList } from "@/components/chat-message-list"
 import { ChatStarterPrompts } from "@/components/chat-starter-prompts"
+import { Button } from "@/components/ui/button"
 
 const STARTER_PROMPTS = [
   "Vad erbjuder ni för typer av AI-tjänster?",
@@ -17,10 +19,19 @@ const STARTER_PROMPTS = [
   "Sammanfatta sidan 'Om oss' i tre punkter och länka källan.",
 ]
 
+function createSessionId(): string {
+  if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
+    return crypto.randomUUID()
+  }
+  return `session_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`
+}
+
 export function CompileitChat() {
   const [input, setInput] = useState("")
+  const [chatId, setChatId] = useState<string>(() => createSessionId())
 
-  const { messages, sendMessage, status, error, clearError } = useChat({
+  const { messages, sendMessage, status, error, clearError, stop } = useChat({
+    id: chatId,
     transport: new DefaultChatTransport({ api: "/api/chat" }),
   })
 
@@ -51,15 +62,34 @@ export function CompileitChat() {
     void submitPrompt(input)
   }
 
+  const handleResetChat = () => {
+    stop()
+    clearError()
+    setInput("")
+    setChatId(createSessionId())
+  }
+
   return (
     <div className="compileit-background relative isolate min-h-dvh w-full overflow-hidden text-slate-100">
       <div className="relative z-10 flex min-h-dvh w-full min-w-0 flex-col">
         <header className="border-b border-slate-900/90 bg-slate-950/80 backdrop-blur-sm">
-          <div className="mx-auto flex h-14 w-full max-w-6xl items-center px-4 sm:px-6">
-            <p className="font-mono text-sm text-slate-400">
+          <div className="mx-auto flex h-14 w-full max-w-6xl items-center justify-between gap-3 px-4 sm:px-6">
+            <p className="min-w-0 truncate font-mono text-sm text-slate-400">
               <span className="mr-2 text-blue-500">&gt;_</span>
               Compileits AI-assistent
             </p>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={handleResetChat}
+              className="shrink-0 border-slate-700 bg-slate-900/70 text-slate-200 hover:bg-slate-800 hover:text-white"
+              aria-label="Starta om chatten"
+              title="Starta om chatten"
+            >
+              <RotateCcw className="size-4" />
+              <span className="hidden sm:inline">Starta om</span>
+            </Button>
           </div>
         </header>
 
