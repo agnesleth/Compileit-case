@@ -47,13 +47,13 @@ function renderTextWithBoldMarkdown(text: string) {
 
 export function AssistantTypingIndicator() {
   return (
-    <div className="flex w-full justify-start gap-3">
+    <div className="flex w-full min-w-0 justify-start gap-3">
       <Avatar size="sm" className="mt-1 border border-blue-900/40 bg-slate-900/80">
         <AvatarFallback className="bg-transparent text-blue-300">
           <Bot className="size-3.5" />
         </AvatarFallback>
       </Avatar>
-      <div className="max-w-[85%] rounded-2xl border border-slate-800/90 bg-slate-900/80 px-4 py-3 text-sm">
+      <div className="min-w-0 max-w-[85%] rounded-2xl border border-slate-800/90 bg-slate-900/80 px-4 py-3 text-sm">
         <div className="flex items-center gap-1.5">
           <span className="size-2 animate-bounce rounded-full bg-blue-400 [animation-delay:-0.3s]" />
           <span className="size-2 animate-bounce rounded-full bg-blue-400/85 [animation-delay:-0.15s]" />
@@ -70,7 +70,7 @@ export function ChatMessageItem({ message }: { message: UIMessage }) {
   const sources = isUser ? [] : extractSourcesFromMessage(message)
 
   return (
-    <div className={cn("flex w-full gap-3", isUser ? "justify-end" : "justify-start")}>
+    <div className={cn("flex w-full min-w-0 gap-3", isUser ? "justify-end" : "justify-start")}>
       {!isUser && (
         <Avatar size="sm" className="mt-1 border border-blue-900/40 bg-slate-900/80">
           <AvatarFallback className="bg-transparent text-blue-300">
@@ -79,10 +79,10 @@ export function ChatMessageItem({ message }: { message: UIMessage }) {
         </Avatar>
       )}
 
-      <div className={cn("max-w-[85%] space-y-2", isUser ? "items-end" : "items-start")}>
+      <div className={cn("min-w-0 max-w-[85%] space-y-2", isUser ? "items-end" : "items-start")}>
         <div
           className={cn(
-            "rounded-2xl border px-4 py-3 text-sm leading-7 whitespace-pre-wrap",
+            "min-w-0 rounded-2xl border px-4 py-3 text-sm leading-7 whitespace-pre-wrap break-words [overflow-wrap:anywhere]",
             isUser
               ? "border-blue-500/20 bg-blue-600/20 text-blue-50"
               : "border-slate-800/90 bg-slate-900/80 text-slate-100"
@@ -97,10 +97,15 @@ export function ChatMessageItem({ message }: { message: UIMessage }) {
               <Badge
                 asChild
                 variant="outline"
-                className="border-blue-500/30 bg-blue-500/10 text-blue-100 hover:bg-blue-500/20"
+                className="max-w-full border-blue-500/30 bg-blue-500/10 text-blue-100 whitespace-normal break-words hover:bg-blue-500/20"
                 key={`${source.url}-${source.title}`}
               >
-                <a href={source.url} target="_blank" rel="noreferrer noopener">
+                <a
+                  href={source.url}
+                  target="_blank"
+                  rel="noreferrer noopener"
+                  className="block max-w-full break-words [overflow-wrap:anywhere]"
+                >
                   {source.title}
                 </a>
               </Badge>

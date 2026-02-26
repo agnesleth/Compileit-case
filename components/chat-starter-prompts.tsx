@@ -13,7 +13,7 @@ export function ChatStarterPrompts({
   onSelectPrompt: (prompt: string) => void
 }) {
   return (
-    <div className="mt-8 grid w-full max-w-2xl grid-cols-1 gap-3 text-left sm:grid-cols-2">
+    <div className="mt-8 grid w-full min-w-0 max-w-2xl grid-cols-1 gap-3 text-left sm:grid-cols-2">
       {prompts.map((prompt, index) => (
         <Button
           key={prompt}
@@ -22,7 +22,7 @@ export function ChatStarterPrompts({
           disabled={disabled}
           onClick={() => onSelectPrompt(prompt)}
           className={cn(
-            "h-auto min-h-16 whitespace-normal rounded-2xl border-slate-800 bg-slate-900/80 px-5 py-4 text-sm leading-6 text-slate-200 hover:bg-slate-900 hover:text-white",
+            "h-auto min-h-16 min-w-0 whitespace-normal break-words rounded-2xl border-slate-800 bg-slate-900/80 px-5 py-4 text-sm leading-6 text-slate-200 hover:bg-slate-900 hover:text-white",
             index === prompts.length - 1 && prompts.length % 2 !== 0
               ? "sm:col-span-2 sm:mx-auto sm:w-[calc(50%-0.375rem)]"
               : ""

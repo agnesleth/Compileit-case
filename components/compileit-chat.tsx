@@ -52,8 +52,8 @@ export function CompileitChat() {
   }
 
   return (
-    <div className="compileit-background relative isolate min-h-dvh overflow-hidden text-slate-100">
-      <div className="relative z-10 flex min-h-dvh flex-col">
+    <div className="compileit-background relative isolate min-h-dvh w-full overflow-hidden text-slate-100">
+      <div className="relative z-10 flex min-h-dvh w-full min-w-0 flex-col">
         <header className="border-b border-slate-900/90 bg-slate-950/80 backdrop-blur-sm">
           <div className="mx-auto flex h-14 w-full max-w-6xl items-center px-4 sm:px-6">
             <p className="font-mono text-sm text-slate-400">
@@ -63,12 +63,12 @@ export function CompileitChat() {
           </div>
         </header>
 
-        <main className="mx-auto flex w-full max-w-6xl flex-1 px-3 sm:px-6">
+        <main className="mx-auto flex w-full min-w-0 max-w-6xl flex-1 px-3 sm:px-6">
           {hasMessages ? (
             <ChatMessageList messages={messages} status={status} />
           ) : (
-            <section className="mx-auto flex w-full max-w-3xl flex-1 flex-col items-center justify-center pb-48 text-center sm:pb-56">
-              <h1 className="text-4xl font-semibold tracking-tight text-slate-100 sm:text-5xl">
+            <section className="mx-auto flex w-full min-w-0 max-w-3xl flex-1 flex-col items-center justify-center pb-44 text-center sm:pb-56">
+              <h1 className="text-3xl font-semibold tracking-tight text-slate-100 sm:text-5xl">
                 Hej! Fråga mig om <span className="text-blue-400">Compileit</span>
               </h1>
               <p className="mt-4 max-w-xl text-balance text-base leading-7 text-slate-400 sm:text-xl">

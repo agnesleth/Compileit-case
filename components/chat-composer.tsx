@@ -23,7 +23,7 @@ export function ChatComposer({
 
   return (
     <div className="pointer-events-none fixed inset-x-0 bottom-0 z-30 px-3 pb-[calc(0.75rem+env(safe-area-inset-bottom))] sm:px-6 sm:pb-[calc(1rem+env(safe-area-inset-bottom))]">
-      <div className="pointer-events-auto mx-auto w-full max-w-3xl">
+      <div className="pointer-events-auto mx-auto w-full min-w-0 max-w-3xl">
         {errorMessage ? (
           <div className="mb-3 rounded-xl border border-rose-500/30 bg-rose-500/10 px-4 py-2 text-sm text-rose-200">
             {errorMessage}
@@ -32,7 +32,7 @@ export function ChatComposer({
 
         <form
           onSubmit={onSubmit}
-          className="flex items-center gap-2 rounded-2xl border border-slate-800 bg-slate-950/95 p-2 shadow-[0_0_36px_rgba(37,99,235,0.22)] backdrop-blur"
+          className="flex min-w-0 items-center gap-2 rounded-2xl border border-slate-800 bg-slate-950/95 p-2 shadow-[0_0_36px_rgba(37,99,235,0.22)] backdrop-blur"
         >
           <Input
             value={input}

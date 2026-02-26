@@ -27,8 +27,8 @@ export function ChatMessageList({
     messages[messages.length - 1]?.role === "user"
 
   return (
-    <ScrollArea className="h-full w-full">
-      <div className="mx-auto flex w-full max-w-3xl flex-col gap-6 px-0 pt-8 pb-48 sm:pt-10 sm:pb-56">
+    <ScrollArea className="h-full w-full min-w-0">
+      <div className="mx-auto flex w-full min-w-0 max-w-3xl flex-col gap-6 px-0 pt-6 pb-48 sm:pt-10 sm:pb-56">
         {messages.map((message) => (
           <ChatMessageItem key={message.id} message={message} />
         ))}
