@@ -53,7 +53,7 @@ LOW_CONFIDENCE_RESPONSE_TEMPLATE = (
     "Exempel: branscher hos kunder, typer av uppdrag eller vilka tjänster Compileit erbjuder."
 )
 
-DEFAULT_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+DEFAULT_MODEL = os.getenv("OPENAI_MODEL", "gpt-5-mini")
 DEFAULT_COLLECTION = os.getenv("CHROMA_COLLECTION_NAME", "compileit_docs")
 DEFAULT_CANDIDATE_K = int(os.getenv("RETRIEVAL_CANDIDATE_K", "24"))
 DEFAULT_FINAL_K = int(os.getenv("RETRIEVAL_FINAL_K", "6"))
