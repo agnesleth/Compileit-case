@@ -45,12 +45,10 @@ Regler du ALLTID ska följa:
 
 FALLBACK_NO_CONTEXT_RESPONSE = (
     "Jag vet inte säkert baserat på informationen jag har hittat om Compileit.\n"
-    "Menar du branscher hos kunderna, eller vilka typer av uppdrag och tjänster vi jobbar med?"
 )
 LOW_CONFIDENCE_RESPONSE_TEMPLATE = (
     "Jag vet inte säkert utifrån tillgänglig information för frågan: \"{query}\".\n"
-    "Kan du förtydliga vad du menar?\n"
-    "Exempel: branscher hos kunder, typer av uppdrag eller vilka tjänster Compileit erbjuder."
+    "Kan du förtydliga vad du menar?"
 )
 
 DEFAULT_MODEL = os.getenv("OPENAI_MODEL", "gpt-5-mini")
@@ -120,6 +118,14 @@ CONTACT_INTENT_PATTERNS = (
     r"\badress\w*",
     r"\bsitter\b",
 )
+SECURITY_INTENT_PATTERNS = (
+    r"\bsäker\w*",
+    r"\bsekret\w*",
+    r"\bintegritet\w*",
+    r"\bgdpr\b",
+    r"\bdataskydd\w*",
+    r"\bprivacy\b",
+)
 CONTACT_EXPANSION_TERMS = (
     "kontakt",
     "epost",
@@ -130,6 +136,18 @@ CONTACT_EXPANSION_TERMS = (
     "stockholm",
     "kalmar",
     "skövde",
+)
+SECURITY_EVIDENCE_STEMS = (
+    "säker",
+    "sekret",
+    "integritet",
+    "gdpr",
+    "dataskydd",
+    "privacy",
+    "policy",
+    "compliance",
+    "iso",
+    "certifier",
 )
 OUT_OF_SCOPE_STEMS = (
     "väd",
@@ -394,6 +412,19 @@ def _is_contact_intent(query: str) -> bool:
     return any(re.search(pattern, lowered) for pattern in CONTACT_INTENT_PATTERNS)
 
 
+def _is_security_intent(query: str) -> bool:
+    lowered = query.lower()
+    return any(re.search(pattern, lowered) for pattern in SECURITY_INTENT_PATTERNS)
+
+
+def _candidate_has_security_evidence(candidate: RetrievedCandidate) -> bool:
+    haystack = " ".join(
+        [candidate.title or "", candidate.path or "", candidate.snippet or ""]
+    ).lower()
+    tokens = set(_tokenize(haystack))
+    return _tokens_match_stems(tokens, SECURITY_EVIDENCE_STEMS)
+
+
 def _expand_search_query(query: str) -> str:
     expanded_terms: list[str] = []
     for pattern in BUSINESS_INTENT_BRANSCH_PATTERNS:
@@ -519,6 +550,7 @@ def _is_low_confidence(
     generic_count = sum(1 for item in selected_candidates if _is_generic_chunk(item.snippet))
     query_tokens = set(_tokenize(question))
     contact_intent = _is_contact_intent(question)
+    security_intent = _is_security_intent(question)
     has_contact_evidence = any(
         item.section == "contact"
         or item.content_type == "contact"
@@ -541,6 +573,12 @@ def _is_low_confidence(
         if not has_contact_evidence:
             return True
         if top.final_score < 0.50:
+            return True
+    if security_intent:
+        has_security_evidence = any(
+            _candidate_has_security_evidence(item) for item in selected_candidates
+        )
+        if not has_security_evidence:
             return True
     if _tokens_match_stems(query_tokens, OUT_OF_SCOPE_STEMS):
         return True
@@ -790,10 +828,12 @@ def stream_answer_tokens(
     )
 
     if not context:
-        return sources, iter([FALLBACK_NO_CONTEXT_RESPONSE])
+        # Avoid showing citations when retrieval has no usable grounding context.
+        return [], iter([FALLBACK_NO_CONTEXT_RESPONSE])
 
     if low_confidence:
-        return sources, iter([_build_low_confidence_response(expanded_query)])
+        # Avoid showing citations when confidence gating decides not to answer.
+        return [], iter([_build_low_confidence_response(expanded_query)])
 
     sources_block = _format_sources_block(sources)
     system_prompt = (
