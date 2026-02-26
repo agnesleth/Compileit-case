@@ -1,50 +1,93 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Compileit Case
 
-## Getting Started
+Frontend (Next.js + Vercel AI SDK) + backend (FastAPI + LangGraph + Chroma) for a Swedish Compileit assistant.
 
-First, run the development server:
+## Prerequisites
 
-```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
-```
+- Node.js 20+
+- Python 3.9+
+- OpenAI API key
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+## 1. Install dependencies
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
-
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
-
-## Backend Chat Proxy
-
-The frontend sends chat requests to `POST /api/chat`, which proxies to your backend endpoint.
-
-Set one of these in `.env.local`:
+Frontend:
 
 ```bash
-# Preferred: full backend endpoint
-BACKEND_CHAT_URL=http://localhost:8000/api/chat
-
-# Alternative: base URL (route proxy appends /api/chat)
-# BACKEND_BASE_URL=http://localhost:8000
+npm install
 ```
 
-## Learn More
+Backend (recommended in virtual environment):
 
-To learn more about Next.js, take a look at the following resources:
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r backend/requirements.txt
+```
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+## 2. Configure environment variables
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+Backend:
 
-## Deploy on Vercel
+```bash
+cp backend/.env.example backend/.env
+```
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+Set at least:
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+```bash
+OPENAI_API_KEY=your_key_here
+```
+
+Frontend:
+
+Create `.env.local` with:
+
+```bash
+BACKEND_CHAT_URL=http://127.0.0.1:8000/api/chat
+```
+
+Alternative:
+
+```bash
+# BACKEND_BASE_URL=http://127.0.0.1:8000
+```
+
+## 3. Build the vector index (required before first run)
+
+```bash
+.venv/bin/python backend/ingest.py
+```
+
+## 4. Start the app
+
+Terminal 1 (backend):
+
+```bash
+uvicorn backend.main:app --host 0.0.0.0 --port 8000
+```
+
+Terminal 2 (frontend):
+
+```bash
+npm run dev -- --hostname 0.0.0.0 --port 3000
+```
+
+Open:
+
+- Local: `http://localhost:3000`
+- Same Wi-Fi device: `http://<your-laptop-ip>:3000`
+
+## 5. Useful checks
+
+```bash
+npm run lint
+npm run build
+curl -i http://127.0.0.1:8000/health
+```
+
+## Why this design
+
+- A Next.js `/api/chat` proxy decouples frontend from backend deployment and hides backend URL details from the client.
+- Corporate-first retrieval improves precision by prioritizing business-relevant Compileit pages over noisy or recruiting/legal content.
+- Conservative confidence gating avoids hallucinations by returning "Jag vet inte" when context quality is weak.
+- Source citations are passed through and rendered in UI so answers stay verifiable and grounded.
