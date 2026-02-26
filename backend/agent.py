@@ -40,6 +40,7 @@ Regler du ALLTID ska följa:
 2. Håll svaren korta, konkreta och korrekta.
 3. Använd endast information som finns i den hämtade kontexten.
 4. Om kontexten inte räcker för att besvara frågan, säg tydligt att du inte vet.
+5. Om frågan gäller kontakt eller kontor, lista alla kontaktvägar och orter som nämns i kontexten.
 """
 
 FALLBACK_NO_CONTEXT_RESPONSE = (
@@ -57,8 +58,14 @@ DEFAULT_COLLECTION = os.getenv("CHROMA_COLLECTION_NAME", "compileit_docs")
 DEFAULT_CANDIDATE_K = int(os.getenv("RETRIEVAL_CANDIDATE_K", "24"))
 DEFAULT_FINAL_K = int(os.getenv("RETRIEVAL_FINAL_K", "6"))
 DEBUG_RETRIEVAL = os.getenv("DEBUG_RETRIEVAL", "0").lower() in ("1", "true", "yes")
+PRINT_RETRIEVAL_REPORT = os.getenv("PRINT_RETRIEVAL_REPORT", "1").lower() in (
+    "1",
+    "true",
+    "yes",
+)
 
 SECTION_BOOSTS: dict[str, float] = {
+    "contact": 0.22,
     "services": 0.20,
     "cases": 0.18,
     "about": 0.08,
@@ -102,6 +109,28 @@ GENERIC_TEXT_PATTERNS = (
 )
 BUSINESS_INTENT_BRANSCH_PATTERNS = (r"\bbransch\w*", r"\bindustri\w*")
 BRANSCH_EXPANSION_TERMS = ("kunder", "uppdrag", "case", "verksamhet")
+CONTACT_INTENT_PATTERNS = (
+    r"\bkontakt\w*",
+    r"\bmail\w*",
+    r"\bepost\w*",
+    r"\be-?post\w*",
+    r"\btelefon\w*",
+    r"\btel\b",
+    r"\bkontor\w*",
+    r"\badress\w*",
+    r"\bsitter\b",
+)
+CONTACT_EXPANSION_TERMS = (
+    "kontakt",
+    "epost",
+    "email",
+    "telefon",
+    "kontor",
+    "adress",
+    "stockholm",
+    "kalmar",
+    "skövde",
+)
 OUT_OF_SCOPE_STEMS = (
     "väd",
     "temperat",
@@ -123,6 +152,13 @@ COMPILEIT_RELEVANCE_STEMS = (
     "apputveck",
     "webbutveck",
     "kontakt",
+    "mail",
+    "telefon",
+    "kontor",
+    "adress",
+    "stockhol",
+    "kalmar",
+    "skövd",
     "säker",
     "sekret",
     "karri",
@@ -135,10 +171,13 @@ class RetrievedCandidate:
     title: str
     url: str
     section: str
+    path: str
+    content_type: str
     snippet: str
     vector_score: float
     lexical_score: float
     section_boost: float
+    intent_boost: float
     final_score: float
 
 
@@ -159,6 +198,55 @@ class AgentState(TypedDict, total=False):
 def debug_log(message: str, *args: object) -> None:
     if DEBUG_RETRIEVAL:
         logger.info(message, *args)
+
+
+def _truncate_text(text: str, limit: int = 320) -> str:
+    compact = " ".join(text.split())
+    if len(compact) <= limit:
+        return compact
+    return f"{compact[:limit].rstrip()}..."
+
+
+def _log_retrieval_report(
+    question: str,
+    expanded_query: str,
+    selected_candidates: Sequence[RetrievedCandidate],
+    low_confidence: bool,
+) -> None:
+    if not PRINT_RETRIEVAL_REPORT:
+        return
+
+    lines: list[str] = []
+    lines.append("")
+    lines.append("=" * 88)
+    lines.append("RETRIEVAL REPORT")
+    lines.append("=" * 88)
+    lines.append(f"Query          : {question}")
+    lines.append(f"Expanded query : {expanded_query}")
+    lines.append(f"Low confidence : {low_confidence}")
+    lines.append(f"Selected hits  : {len(selected_candidates)}")
+    lines.append("-" * 88)
+
+    if not selected_candidates:
+        lines.append("No candidates selected.")
+    else:
+        for idx, candidate in enumerate(selected_candidates, start=1):
+            lines.append(
+                f"[{idx}] section={candidate.section} "
+                f"type={candidate.content_type} "
+                f"final={candidate.final_score:.3f} "
+                f"vector={candidate.vector_score:.3f} "
+                f"lexical={candidate.lexical_score:.3f} "
+                f"intent={candidate.intent_boost:.3f}"
+            )
+            lines.append(f"    title : {candidate.title}")
+            lines.append(f"    url   : {candidate.url}")
+            lines.append(f"    path  : {candidate.path}")
+            lines.append(f"    ctx   : {_truncate_text(candidate.snippet)}")
+            lines.append("-" * 88)
+
+    lines.append("=" * 88)
+    logger.info("\n%s", "\n".join(lines))
 
 
 def _get_chroma_persist_dir() -> str:
@@ -301,6 +389,11 @@ def _tokens_match_stems(tokens: set[str], stems: Sequence[str]) -> bool:
     return False
 
 
+def _is_contact_intent(query: str) -> bool:
+    lowered = query.lower()
+    return any(re.search(pattern, lowered) for pattern in CONTACT_INTENT_PATTERNS)
+
+
 def _expand_search_query(query: str) -> str:
     expanded_terms: list[str] = []
     for pattern in BUSINESS_INTENT_BRANSCH_PATTERNS:
@@ -308,10 +401,25 @@ def _expand_search_query(query: str) -> str:
             expanded_terms.extend(BRANSCH_EXPANSION_TERMS)
             break
 
+    if _is_contact_intent(query):
+        expanded_terms.extend(CONTACT_EXPANSION_TERMS)
+
     if not expanded_terms:
         return query
 
-    expansion = " ".join(expanded_terms)
+    query_tokens = set(_tokenize(query))
+    deduped_terms: list[str] = []
+    seen_terms: set[str] = set()
+    for term in expanded_terms:
+        if term in query_tokens or term in seen_terms:
+            continue
+        seen_terms.add(term)
+        deduped_terms.append(term)
+
+    if not deduped_terms:
+        return query
+
+    expansion = " ".join(deduped_terms)
     return f"{query} {expansion}".strip()
 
 
@@ -319,6 +427,8 @@ def _build_candidate(
     doc: Document,
     vector_score: float,
     query_for_lexical: str,
+    *,
+    contact_intent: bool,
 ) -> RetrievedCandidate | None:
     metadata = doc.metadata or {}
     url = str(metadata.get("source", "")).strip()
@@ -329,28 +439,44 @@ def _build_candidate(
     if domain and domain != "compileit.com":
         return None
 
+    path = str(metadata.get("path", "")).strip().lower()
+    content_type = str(metadata.get("content_type", "page")).strip().lower() or "page"
     section = str(metadata.get("section", "general")).strip().lower() or "general"
+    if content_type == "contact" or path.startswith("/kontakt"):
+        section = "contact"
+
     section_boost = SECTION_BOOSTS.get(section, 0.0)
+    intent_boost = 0.0
+    if contact_intent:
+        if content_type == "contact" or path.startswith("/kontakt"):
+            intent_boost = 0.22
+        elif section in {"about", "general"}:
+            intent_boost = 0.04
 
     snippet = " ".join(str(doc.page_content).split())
-    snippet = snippet[:700].strip()
+    snippet_limit = 1200 if content_type == "contact" else 700
+    snippet = snippet[:snippet_limit].strip()
     lexical_score = _lexical_overlap_score(query_for_lexical, snippet)
-    final_score = (0.75 * vector_score) + (0.25 * lexical_score) + section_boost
+    final_score = (0.75 * vector_score) + (0.25 * lexical_score) + section_boost + intent_boost
 
     return RetrievedCandidate(
         title=_sanitize_title(str(metadata.get("title", "")), url),
         url=url,
         section=section,
+        path=path or "/",
+        content_type=content_type,
         snippet=snippet,
         vector_score=vector_score,
         lexical_score=lexical_score,
         section_boost=section_boost,
+        intent_boost=intent_boost,
         final_score=final_score,
     )
 
 
 def _retrieve_ranked_candidates(question: str) -> tuple[str, list[RetrievedCandidate]]:
     expanded_query = _expand_search_query(question)
+    contact_intent = _is_contact_intent(question)
     vector_store = get_vector_store()
 
     try:
@@ -367,7 +493,12 @@ def _retrieve_ranked_candidates(question: str) -> tuple[str, list[RetrievedCandi
     candidates: list[RetrievedCandidate] = []
     for doc, raw_score in doc_score_pairs:
         vector_score = _clamp_score(float(raw_score))
-        candidate = _build_candidate(doc=doc, vector_score=vector_score, query_for_lexical=expanded_query)
+        candidate = _build_candidate(
+            doc=doc,
+            vector_score=vector_score,
+            query_for_lexical=expanded_query,
+            contact_intent=contact_intent,
+        )
         if candidate is not None:
             candidates.append(candidate)
 
@@ -387,6 +518,13 @@ def _is_low_confidence(
     sections = {item.section for item in selected_candidates}
     generic_count = sum(1 for item in selected_candidates if _is_generic_chunk(item.snippet))
     query_tokens = set(_tokenize(question))
+    contact_intent = _is_contact_intent(question)
+    has_contact_evidence = any(
+        item.section == "contact"
+        or item.content_type == "contact"
+        or item.path.startswith("/kontakt")
+        for item in selected_candidates
+    )
 
     if top.final_score < 0.42:
         return True
@@ -398,6 +536,11 @@ def _is_low_confidence(
         return True
     if re.search(r"\bbransch\w*", question.lower()):
         if not any(item.section in {"services", "cases", "about"} for item in selected_candidates):
+            return True
+    if contact_intent:
+        if not has_contact_evidence:
+            return True
+        if top.final_score < 0.50:
             return True
     if _tokens_match_stems(query_tokens, OUT_OF_SCOPE_STEMS):
         return True
@@ -412,6 +555,7 @@ def _build_context_and_sources(
 ) -> tuple[str, list[SourceItem], list[dict[str, float | str]]]:
     context_chunks: list[str] = []
     sources: list[SourceItem] = []
+    seen_source_urls: set[str] = set()
     retrieval_rows: list[dict[str, float | str]] = []
 
     for index, candidate in enumerate(candidates, start=1):
@@ -420,15 +564,20 @@ def _build_context_and_sources(
             f"URL: {candidate.url}\n"
             f"Innehåll: {candidate.snippet}"
         )
-        sources.append({"title": candidate.title, "url": candidate.url})
+        if candidate.url not in seen_source_urls:
+            seen_source_urls.add(candidate.url)
+            sources.append({"title": candidate.title, "url": candidate.url})
         retrieval_rows.append(
             {
                 "title": candidate.title,
                 "url": candidate.url,
                 "section": candidate.section,
+                "path": candidate.path,
+                "content_type": candidate.content_type,
                 "vector_score": candidate.vector_score,
                 "lexical_score": candidate.lexical_score,
                 "section_boost": candidate.section_boost,
+                "intent_boost": candidate.intent_boost,
                 "final_score": candidate.final_score,
             }
         )
@@ -443,11 +592,12 @@ def search_compileit_knowledge(question: str) -> dict[str, Any]:
     """
     expanded_query, ranked_candidates = _retrieve_ranked_candidates(question)
     selected: list[RetrievedCandidate] = []
-    seen_urls: set[str] = set()
+    per_url_count: dict[str, int] = {}
     for candidate in ranked_candidates:
-        if candidate.url in seen_urls:
+        current_count = per_url_count.get(candidate.url, 0)
+        if current_count >= 2:
             continue
-        seen_urls.add(candidate.url)
+        per_url_count[candidate.url] = current_count + 1
         selected.append(candidate)
         if len(selected) >= DEFAULT_FINAL_K:
             break
@@ -462,14 +612,22 @@ def search_compileit_knowledge(question: str) -> dict[str, Any]:
     debug_log("retrieval.count selected=%s total=%s", len(selected), len(ranked_candidates))
     for row in retrieval_rows[:6]:
         debug_log(
-            "retrieval.hit section=%s final=%.3f vec=%.3f lex=%.3f url=%s",
+            "retrieval.hit section=%s type=%s final=%.3f vec=%.3f lex=%.3f intent=%.3f url=%s",
             row["section"],
+            row["content_type"],
             float(row["final_score"]),
             float(row["vector_score"]),
             float(row["lexical_score"]),
+            float(row["intent_boost"]),
             row["url"],
         )
     debug_log("retrieval.low_confidence=%s", low_confidence)
+    _log_retrieval_report(
+        question=question,
+        expanded_query=expanded_query,
+        selected_candidates=selected,
+        low_confidence=low_confidence,
+    )
 
     return {
         "context": context,

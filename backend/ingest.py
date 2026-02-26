@@ -56,6 +56,7 @@ PATH_DENYLIST_PREFIXES = (
     "/connect",
     "/sso",
 )
+CONTACT_PATH_PREFIXES = ("/kontakt", "/kontakta")
 BOILERPLATE_PATTERNS = (
     "webbplatsen använder cookies",
     "välj vilka cookies du vill godkänna",
@@ -121,8 +122,15 @@ def normalize_text(text: str) -> str:
     return " ".join(text.split()).strip()
 
 
+def is_contact_path(path: str) -> bool:
+    lowered = (path or "/").lower()
+    return any(lowered.startswith(prefix) for prefix in CONTACT_PATH_PREFIXES)
+
+
 def classify_section(path: str) -> str:
     lowered = path.lower()
+    if is_contact_path(lowered):
+        return "contact"
     if lowered.startswith("/vara-tjanster"):
         return "services"
     if lowered.startswith("/uppdrag"):
@@ -136,6 +144,8 @@ def classify_section(path: str) -> str:
 
 def infer_content_type(path: str) -> str:
     lowered = path.lower()
+    if is_contact_path(lowered):
+        return "contact"
     if lowered.startswith("/uppdrag"):
         return "case"
     if lowered.startswith("/nyheter"):
@@ -147,9 +157,11 @@ def infer_content_type(path: str) -> str:
     return "page"
 
 
-def is_low_quality_chunk(text: str) -> bool:
+def is_low_quality_chunk(text: str, *, content_type: str = "page") -> bool:
     cleaned = normalize_text(text)
-    if len(cleaned) < 120:
+    is_contact = content_type == "contact"
+    min_chars = 70 if is_contact else 120
+    if len(cleaned) < min_chars:
         return True
 
     lowered = cleaned.lower()
@@ -157,17 +169,19 @@ def is_low_quality_chunk(text: str) -> bool:
         return True
 
     tokens = re.findall(r"[a-z0-9åäö]+", lowered)
-    if len(tokens) < 20:
+    min_tokens = 12 if is_contact else 20
+    if len(tokens) < min_tokens:
         return True
 
     unique_ratio = len(set(tokens)) / len(tokens)
-    if unique_ratio < 0.30:
+    min_unique_ratio = 0.20 if is_contact else 0.30
+    if unique_ratio < min_unique_ratio:
         return True
 
     return False
 
 
-def extract_clean_text(html: str) -> tuple[str, str]:
+def extract_clean_text(html: str, page_url: str) -> tuple[str, str]:
     soup = BeautifulSoup(html, "html.parser")
 
     for tag in soup(["script", "style", "noscript", "iframe", "svg"]):
@@ -177,13 +191,53 @@ def extract_clean_text(html: str) -> tuple[str, str]:
     if soup.title and soup.title.string:
         title = " ".join(soup.title.string.split())
 
+    path = (urlparse(page_url).path or "/").lower()
+    is_contact_page = is_contact_path(path)
+    min_len = 6 if is_contact_page else 20
+
     text_blocks: list[str] = []
-    for element in soup.find_all(["h1", "h2", "h3", "h4", "p", "li"]):
+    for element in soup.find_all(["h1", "h2", "h3", "h4", "p", "li", "address"]):
         text = normalize_text(element.get_text(" ", strip=True))
-        if len(text) >= 20 and not should_skip_text_block(text):
+        if len(text) >= min_len and not should_skip_text_block(text):
             text_blocks.append(text)
 
-    combined = "\n".join(text_blocks).strip()
+    for anchor in soup.find_all("a", href=True):
+        href = anchor.get("href", "").strip()
+        lowered_href = href.lower()
+        if lowered_href.startswith("mailto:"):
+            email = href.split(":", 1)[1].split("?", 1)[0].strip().replace(" ", "")
+            if email:
+                text_blocks.append(f"E-post: {email}")
+        elif lowered_href.startswith("tel:"):
+            phone = href.split(":", 1)[1].split("?", 1)[0].strip().replace(" ", "")
+            if phone:
+                text_blocks.append(f"Telefon: {phone}")
+
+    if is_contact_page:
+        # Contact pages often keep address/city lines in div wrappers instead of <p>/<li>.
+        for element in soup.find_all("div"):
+            text = normalize_text(element.get_text(" ", strip=True))
+            lowered = text.lower()
+            if len(text) < 30 or len(text) > 900:
+                continue
+            if should_skip_text_block(text):
+                continue
+            if (
+                "våra kontor" in lowered
+                or "kontakta oss" in lowered
+                or "@compileit.com" in lowered
+            ):
+                text_blocks.append(text)
+
+    deduped_blocks: list[str] = []
+    seen_blocks: set[str] = set()
+    for block in text_blocks:
+        if block in seen_blocks:
+            continue
+        seen_blocks.add(block)
+        deduped_blocks.append(block)
+
+    combined = "\n".join(deduped_blocks).strip()
     return title, combined
 
 
@@ -244,7 +298,7 @@ def crawl_compileit(start_url: str, max_pages: int) -> list[PageData]:
             print(f"[warn] Kunde inte hämta {url}: {exc}")
             continue
 
-        title, text = extract_clean_text(response.text)
+        title, text = extract_clean_text(response.text, page_url=url)
         if text:
             pages.append(PageData(url=url, title=title, text=text))
 
@@ -289,7 +343,8 @@ def chunk_documents(documents: list[Document]) -> list[Document]:
 
     for chunk in raw_chunks:
         normalized = normalize_text(chunk.page_content)
-        if is_low_quality_chunk(normalized):
+        content_type = str(chunk.metadata.get("content_type", "page")).strip().lower()
+        if is_low_quality_chunk(normalized, content_type=content_type):
             continue
         if normalized in seen_texts:
             continue

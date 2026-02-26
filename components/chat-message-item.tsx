@@ -27,6 +27,24 @@ function getMessageText(message: UIMessage): string {
   return ""
 }
 
+function renderTextWithBoldMarkdown(text: string) {
+  const segments = text.split(/(\*\*[^*\n]+?\*\*)/g)
+  return segments.map((segment, index) => {
+    const isBoldToken =
+      segment.startsWith("**") && segment.endsWith("**") && segment.length > 4
+
+    if (isBoldToken) {
+      return (
+        <strong key={`bold-${index}`} className="font-semibold">
+          {segment.slice(2, -2)}
+        </strong>
+      )
+    }
+
+    return <span key={`text-${index}`}>{segment}</span>
+  })
+}
+
 export function AssistantTypingIndicator() {
   return (
     <div className="flex w-full justify-start gap-3">
@@ -70,7 +88,7 @@ export function ChatMessageItem({ message }: { message: UIMessage }) {
               : "border-slate-800/90 bg-slate-900/80 text-slate-100"
           )}
         >
-          {text || "…"}
+          {text ? renderTextWithBoldMarkdown(text) : "…"}
         </div>
 
         {!isUser && sources.length > 0 && (
