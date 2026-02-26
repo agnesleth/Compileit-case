@@ -87,7 +87,7 @@ curl -i http://127.0.0.1:8000/health
 
 ## Why this design
 
--The Next.js /api/chat proxy separates the frontend from the backend and keeps the backend URL hidden from users.
+- The Next.js /api/chat proxy separates the frontend from the backend and keeps the backend URL hidden from users.
 - Corporate-first retrieval improves accuracy by focusing on relevant Compileit business pages instead of noisy content like recruiting or legal pages.
 - Source citations are shown in the UI so answers can be checked and trusted.
 - LangGraph rewrite → retrieve pipeline uses a two-step process: it first rewrites the latest user message into a clear, standalone search query (based on chat history), then retrieves information. This improves results for follow-up questions.
